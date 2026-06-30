@@ -3,21 +3,19 @@
 
 A lightweight, no-frills **CW (Morse Code) keyer daemon** written in a single Python file.
 
-Designed for simplicity, portability, and ease of deployment -- no root privileges required.
-
+Designed for simplicity, portability, and ease of deployment — no root privileges required.
 
 ---
 
 ## Features
 
-- Basic [cwdaemon] compatibility
+- Basic [cwdaemon](https://github.com/acerion/cwdaemon) compatibility
 - Single-file implementation (no installation required)
 - Runs without `sudo`
 - Supports:
   - In-message speed change
   - Backspace handling
 - Optional systemd user service integration
-
 
 ---
 
@@ -27,7 +25,9 @@ Designed for simplicity, portability, and ease of deployment -- no root privileg
 - Dependencies
   - pyserial (`python3-serial`)
 
-##  Usage
+---
+
+## Usage
 
 ### Run in foreground from a terminal
 
@@ -37,6 +37,19 @@ Designed for simplicity, portability, and ease of deployment -- no root privileg
 
 ```bash
 ./cwkd -h
+usage: cwkd [-h] [-d SERIAL] [--host HOST] [-p PORT] [-s WPM] [-i] [-x SYSTEM]
+
+CW Keyer Daemon
+
+options:
+  -h, --help           show this help message and exit
+  -d, --device SERIAL  serial device (default: /dev/ttyS0)
+  --host HOST          listener host/IP (default: 127.0.0.1)
+  -p, --port PORT      port (default: 6789)
+  -s, --wpm WPM        keying speed (default: 24)
+  -i                   increase log verbosity level
+  -x SYSTEM            sound system [ignored]
+
 ```
 
 ### Testing
