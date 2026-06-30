@@ -1,0 +1,10 @@
+[Unit]
+Description=CW Keyer Daemon
+
+[Service]
+Type=simple
+ExecStart=%h/cwkd/cwkd -i
+Restart=always
+
+[Install]
+WantedBy=default.target

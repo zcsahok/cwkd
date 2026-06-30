@@ -1,0 +1,380 @@
+#!/usr/bin/python3
+
+import os, signal
+import sys
+import argparse
+import logging
+import socketserver
+import time
+from dataclasses import dataclass
+from threading import Thread, Lock, Event, Semaphore
+from collections import deque
+import serial
+from serial.serialutil import SerialException
+
+DEFAULT_WPM = 24
+
+MAX_TUNE_SECONDS    = 10
+MIN_WPM             = 10
+MAX_WPM             = 40
+
+BS                  = chr(0x08)
+ESC                 = chr(0x1b)
+WPM_UP              = 0x01
+WPM_DOWN            = 0x02
+ADD_DELAY           = 0x03
+CW_SPACE            = 0x80
+
+CW_STATE_IDLE       = 0
+CW_STATE_RUN        = 1
+CW_STATE_KEY_DOWN   = 2
+
+@dataclass
+class CwContext:
+    t_next: float = 0
+    state: int = CW_STATE_IDLE
+    c1: int = 0
+    space: int = 0
+    wpm: int = DEFAULT_WPM
+    wpm_save: int = 0
+
+    def add_half_dit_times(self, count):
+        half_dit_time = 1.200 / self.wpm / 2
+        self.t_next += count * half_dit_time
+
+
+class KeyerDeque(deque):
+    def __init__(self, **kwargs):
+        super().__init__(kwargs)
+        self._sem = Semaphore(value=0)
+
+    def append(self, elem):
+        super().append(elem)
+        self._sem.release()
+
+    def popleft(self):
+        self._sem.acquire()
+        return super().popleft()
+
+    def pop(self):
+        # do not block on empty deque
+        if not self._sem.acquire(blocking=False):
+            return None
+        return super().pop()
+
+
+def key_down():
+    logging.debug('-- KEY DOWN')
+    ser.dtr = True
+
+def key_up():
+    logging.debug("-- KEY UP")
+    ser.dtr = False
+
+def cw_task():
+    with cw_context_lock:
+        logging.debug(f'>> cw_task {cw_context.state=}')
+
+        # tuning
+        if 256+1 <= cw_context.c1 and cw_context.c1 <= 256+MAX_TUNE_SECONDS:
+            key_down()
+            delay = cw_context.c1 - 256
+            cw_context.t_next += delay
+            cw_context.state = CW_STATE_IDLE
+            cw_context.c1 = 0
+            return
+
+        if cw_context.c1 == 0 or cw_context.c1 > 0xff:  # strange code received
+            cw_context.state = CW_STATE_IDLE
+
+        if cw_context.state == CW_STATE_IDLE:
+            cw_context.t_next = 0   # we are done
+            return
+
+        if cw_context.state == CW_STATE_KEY_DOWN:
+            key_up()
+            cw_context.state = CW_STATE_RUN
+            cw_context.add_half_dit_times(2)
+            return
+
+        if cw_context.state == CW_STATE_RUN:
+            if cw_context.c1 == 0x80:
+                n = 2*2     # normal inter-char space
+                if cw_context.space > 0:
+                    n = cw_context.space
+                    cw_context.space = 0
+
+                cw_context.state = CW_STATE_IDLE
+                cw_context.add_half_dit_times(n)
+                return
+
+            key_down()
+            if (cw_context.c1 & 0x80) == 0:
+                n = 1*2     # dot
+            else:
+                n = 3*2     # dash
+
+            cw_context.c1 = (cw_context.c1 << 1) & 0xff
+            cw_context.state = CW_STATE_KEY_DOWN
+            cw_context.add_half_dit_times(n)
+
+
+def process_cw_data():
+    while True:
+        key_up()
+        code = queue.popleft()
+
+        # process commands first
+        if code == WPM_UP or code == WPM_DOWN:
+            delta = 2
+            if code == WPM_DOWN:
+                delta = -delta
+            with cw_context_lock:
+                new_wpm = cw_context.wpm + delta
+                if MIN_WPM <= new_wpm and new_wpm <= MAX_WPM:
+                    if cw_context.wpm_save == 0:
+                        cw_context.wpm_save = cw_context.wpm
+                    elif cw_context.wpm_save == new_wpm:
+                        cw_context.wpm_save = 0
+                    cw_context.wpm = new_wpm
+            continue
+
+        if code == ADD_DELAY:
+            with cw_context_lock:
+                if cw_context.space == 0:
+                    cw_context.space = 2*2
+                cw_context.space += 4
+            continue
+
+        with cw_context_lock:
+            cw_context.c1 = code
+            if code == CW_SPACE:
+                cw_context.space = 4*2
+            cw_context.state = CW_STATE_RUN
+            cw_context.t_next = time.time()
+
+        sleeper.clear()
+
+        while cw_context.t_next > 0:
+            delay = cw_context.t_next - time.time()
+            sleeper.wait(delay)
+            if sleeper.is_set():    # interrupted
+                break
+            cw_task()
+
+
+def cw_abort():
+    with cw_context_lock:
+        cw_context.state = CW_STATE_IDLE
+        cw_context.t_next = 0
+        cw_context.c1 = 0
+        cw_context.space = 0
+        if cw_context.wpm_save > 0:
+            cw_context.wpm = cw_context.wpm_save
+            cw_context.wpm_save = 0
+
+        # cancel waiting
+        sleeper.set()
+
+        # clear the queue
+        while True:
+            if queue.pop() is None:
+                break
+
+        key_up()
+
+def cw_set_wpm(wpm: int) -> None:
+    logging.debug(f'set_wpm {wpm}')
+    if MIN_WPM <= wpm and wpm <= MAX_WPM:
+        with cw_context_lock:
+            if cw_context.wpm_save == 0:
+                cw_context.wpm = wpm
+            else:
+                # we are in temporary speed change mode, keep the delta WPM
+                delta = cw_context.wpm - cw_context.wpm_save
+                cw_context.wpm = wpm + delta
+                cw_context.wpm_save = wpm
+
+
+
+MORSE = {
+    '+': WPM_UP,
+    '-': WPM_DOWN,
+    '~': ADD_DELAY,
+    ' ': CW_SPACE,
+
+# 1: dash, 0: dit, MSB first
+    '/': 0b10010_100,
+    '0': 0b11111_100,
+    '1': 0b01111_100,
+    '2': 0b00111_100,
+    '3': 0b00011_100,
+    '4': 0b00001_100,
+    '5': 0b00000_100,
+    '6': 0b10000_100,
+    '7': 0b11000_100,
+    '8': 0b11100_100,
+    '9': 0b11110_100,
+    ':': 0b10110_100,   # KN
+    ';': 0b0101_1000,
+    '<': 0b01010_100,   # AR
+    '=': 0b10001_100,
+    '>': 0b000101_10,   # SK
+    '?': 0b001100_10,
+    '@': 0b011010_10,
+    'A': 0b01_100000,
+    'B': 0b1000_1000,
+    'C': 0b1010_1000,
+    'D': 0b100_10000,
+    'E': 0b0_1000000,
+    'F': 0b0010_1000,
+    'G': 0b110_10000,
+    'H': 0b0000_1000,
+    'I': 0b00_100000,
+    'J': 0b0111_1000,
+    'K': 0b101_10000,
+    'L': 0b0100_1000,
+    'M': 0b11_100000,
+    'N': 0b10_100000,
+    'O': 0b111_10000,
+    'P': 0b0110_1000,
+    'Q': 0b1101_1000,
+    'R': 0b010_10000,
+    'S': 0b000_10000,
+    'T': 0b1_1000000,
+    'U': 0b001_10000,
+    'V': 0b0001_1000,
+    'W': 0b011_10000,
+    'X': 0b1001_1000,
+    'Y': 0b1011_1000,
+    'Z': 0b1100_1000
+}
+
+class CwdUdpHandler(socketserver.DatagramRequestHandler):
+    def handle(self):
+        ip = self.client_address[0]
+        raw = self.rfile.readline().strip()
+        logging.debug('*** %s bytes from %s: %s', len(raw), ip, raw)
+
+        raw,_,_ = raw.partition(b'\x00')    # ignore bytes after NUL
+        data = raw.decode("ascii")
+
+        if len(data) == 0:
+            return
+
+        if data[0] == ESC:
+            data += ' '     # have at least 1 char after ESC
+            arg = data[2:]
+            match data[1]:
+                case '2':       # ESC 2 nn - set speed
+                    try:
+                        wpm = int(arg)
+                        cw_set_wpm(wpm)
+                    except:
+                        logging.error(f'ERROR: invalid wpm value {arg}')
+
+                case '4' | '0': # ESC 4 - abort, ESC 0 - reset
+                    cw_abort()
+
+                case 'c':       # ESC c nn - tune
+                    try:
+                        secs = int(arg)
+                        logging.debug(f'tune {secs}')
+                        if secs > 0:
+                            if secs > MAX_TUNE_SECONDS:
+                                secs = MAX_TUNE_SECONDS
+                            queue.append(256 + secs)
+                    except:
+                        logging.error(f'ERROR: invalid tune seconds {arg}')
+
+        else:   # plain text
+            for c in data.upper():
+                if c in MORSE:
+                    queue.append(MORSE[c])
+                elif c == BS:
+                    logging.debug(f'<< BACKSPACE >>')
+                    queue.pop()
+
+
+
+def process_args():
+    host = '127.0.0.1'
+    port = 6789
+    serial = '/dev/ttyS0'
+
+    parser = argparse.ArgumentParser(description='CW Keyer Daemon')
+    parser.add_argument('-d', '--device', metavar='SERIAL', type=str, default=serial,
+                    help=f'serial device (default: {serial})')
+    parser.add_argument('--host', metavar='HOST', type=str, default=host,
+                    help=f'listener host/IP (default: {host})')
+    parser.add_argument('-p', '--port', metavar='PORT', type=int, default=port,
+                    help=f'port (default: {port})')
+    parser.add_argument('-s', '--wpm', metavar='WPM', type=int, default=DEFAULT_WPM,
+                    help=f'keying speed (default: {DEFAULT_WPM})')
+    parser.add_argument('-i', action='append_const', const = True,
+                    help='increase log verbosity level')
+    parser.add_argument('-x', metavar='SYSTEM', type=str, 
+                    help=f'sound system [ignored]')
+
+    parsed_args, unparsed_args = parser.parse_known_args()
+    if unparsed_args:
+        parser.print_help()
+        sys.exit(1)
+
+    return parsed_args
+
+#########################
+
+args = process_args()
+
+info_level = 0
+if args.i:
+    info_level = len(args.i)
+
+device = args.device
+if not os.path.exists(device):
+    device = "/dev/" + device
+
+LOG_LEVEL = logging.WARNING
+if info_level == 1:
+    LOG_LEVEL = logging.INFO
+elif info_level > 1:
+    LOG_LEVEL = logging.DEBUG
+
+logging.basicConfig(format='%(asctime)s %(message)s', level=LOG_LEVEL)
+logging.info('Listening on %s:%s', args.host, args.port)
+logging.info('   Keying on %s', args.device)
+
+try:
+    ser = serial.Serial(device, timeout=1)
+    ser.rts = False     # disable PTT
+except SerialException as error:
+    print(f'*** {error}')
+    sys.exit(1)
+
+cw_context_lock = Lock()
+cw_context = CwContext()
+queue = KeyerDeque()
+sleeper = Event()
+
+cw_abort()
+
+t = Thread(target=process_cw_data)
+t.start()
+
+try:
+    with socketserver.UDPServer((args.host, args.port), CwdUdpHandler) as server:
+        # Activate the server; this will keep running until you
+        # interrupt the program with Ctrl-C
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+
+except OSError as error:
+    print(f'*** {error}')
+
+
+cw_abort()  # ensure key-up on exit
+
+os.kill(os.getpid(), signal.SIGTERM)    # kills all threads
