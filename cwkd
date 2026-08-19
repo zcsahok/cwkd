@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 
-import os, signal
+import os
+import signal
 import sys
 import argparse
 import logging
@@ -73,7 +74,7 @@ def key_up():
 
 def cw_task():
     with cw_context_lock:
-        logging.debug(f'>> cw_task {cw_context.state=}')
+        logging.debug('>> cw_task cw_context.state=%s', cw_context.state)
 
         # tuning
         if 256+1 <= cw_context.c1 and cw_context.c1 <= 256+MAX_TUNE_SECONDS:
@@ -125,13 +126,13 @@ def process_cw_data():
         code = queue.popleft()
 
         # process commands first
-        if code == WPM_UP or code == WPM_DOWN:
+        if code in {WPM_UP, WPM_DOWN}:
             delta = 2
             if code == WPM_DOWN:
                 delta = -delta
             with cw_context_lock:
                 new_wpm = cw_context.wpm + delta
-                if MIN_WPM <= new_wpm and new_wpm <= MAX_WPM:
+                if MIN_WPM <= new_wpm <= MAX_WPM:
                     if cw_context.wpm_save == 0:
                         cw_context.wpm_save = cw_context.wpm
                     elif cw_context.wpm_save == new_wpm:
@@ -184,8 +185,8 @@ def cw_abort():
         key_up()
 
 def cw_set_wpm(wpm: int) -> None:
-    logging.debug(f'set_wpm {wpm}')
-    if MIN_WPM <= wpm and wpm <= MAX_WPM:
+    logging.debug('set_wpm %s', wpm)
+    if MIN_WPM <= wpm <= MAX_WPM:
         with cw_context_lock:
             if cw_context.wpm_save == 0:
                 cw_context.wpm = wpm
@@ -271,7 +272,7 @@ class CwdUdpHandler(socketserver.DatagramRequestHandler):
                         wpm = int(arg)
                         cw_set_wpm(wpm)
                     except:
-                        logging.error(f'ERROR: invalid wpm value {arg}')
+                        logging.error('ERROR: invalid wpm value %s', arg)
 
                 case '4' | '0': # ESC 4 - abort, ESC 0 - reset
                     cw_abort()
@@ -279,20 +280,19 @@ class CwdUdpHandler(socketserver.DatagramRequestHandler):
                 case 'c':       # ESC c nn - tune
                     try:
                         secs = int(arg)
-                        logging.debug(f'tune {secs}')
+                        logging.debug('tune %s', secs)
                         if secs > 0:
-                            if secs > MAX_TUNE_SECONDS:
-                                secs = MAX_TUNE_SECONDS
+                            secs = min(secs, MAX_TUNE_SECONDS)
                             queue.append(256 + secs)
                     except:
-                        logging.error(f'ERROR: invalid tune seconds {arg}')
+                        logging.error('ERROR: invalid tune seconds %s', arg)
 
         else:   # plain text
             for c in data.upper():
                 if c in MORSE:
                     queue.append(MORSE[c])
                 elif c == BS:
-                    logging.debug(f'<< BACKSPACE >>')
+                    logging.debug('<< BACKSPACE >>')
                     queue.pop()
 
 
@@ -300,11 +300,11 @@ class CwdUdpHandler(socketserver.DatagramRequestHandler):
 def process_args():
     host = '127.0.0.1'
     port = 6789
-    serial = '/dev/ttyS0'
+    tty = '/dev/ttyS0'
 
     parser = argparse.ArgumentParser(description='CW Keyer Daemon')
-    parser.add_argument('-d', '--device', metavar='SERIAL', type=str, default=serial,
-                    help=f'serial device (default: {serial})')
+    parser.add_argument('-d', '--device', metavar='SERIAL', type=str, default=tty, dest='tty',
+                    help=f'serial device (default: {tty})')
     parser.add_argument('--host', metavar='HOST', type=str, default=host,
                     help=f'listener host/IP (default: {host})')
     parser.add_argument('-p', '--port', metavar='PORT', type=int, default=port,
@@ -313,8 +313,8 @@ def process_args():
                     help=f'keying speed (default: {DEFAULT_WPM})')
     parser.add_argument('-i', action='append_const', const = True,
                     help='increase log verbosity level')
-    parser.add_argument('-x', metavar='SYSTEM', type=str, 
-                    help=f'sound system [ignored]')
+    parser.add_argument('-x', metavar='SYSTEM', type=str,
+                    help='sound system [ignored]')
 
     parsed_args, unparsed_args = parser.parse_known_args()
     if unparsed_args:
@@ -331,19 +331,19 @@ info_level = 0
 if args.i:
     info_level = len(args.i)
 
-device = args.device
+device = args.tty
 if not os.path.exists(device):
     device = "/dev/" + device
 
-LOG_LEVEL = logging.WARNING
+log_level = logging.WARNING
 if info_level == 1:
-    LOG_LEVEL = logging.INFO
+    log_level = logging.INFO
 elif info_level > 1:
-    LOG_LEVEL = logging.DEBUG
+    log_level = logging.DEBUG
 
-logging.basicConfig(format='%(asctime)s %(message)s', level=LOG_LEVEL)
+logging.basicConfig(format='%(asctime)s %(message)s', level=log_level)
 logging.info('Listening on %s:%s', args.host, args.port)
-logging.info('   Keying on %s', args.device)
+logging.info('   Keying on %s', device)
 
 try:
     ser = serial.Serial(device, timeout=1)

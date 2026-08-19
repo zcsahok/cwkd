@@ -3,7 +3,7 @@ Description=CW Keyer Daemon
 
 [Service]
 Type=simple
-ExecStart=%h/cwkd/cwkd -i
+ExecStart=%h/cwkd/cwkd -i -d /dev/ttyS0
 Restart=no
 
 [Install]

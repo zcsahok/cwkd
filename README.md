@@ -1,3 +1,5 @@
+![pylint](https://img.shields.io/badge/PyLint-9.29-yellow?logo=python&logoColor=white) 
+
 # CW Keyer Daemon
 
 
@@ -68,6 +70,7 @@ Assuming that _cwkd_ was cloned into `$HOME/cwkd`:
 ```bash
 mkdir -p $HOME/.config/systemd/user
 cp $HOME/cwkd/cwkd.service $HOME/.config/systemd/user/cwkd.service
+# !!! adapt -d option in cwkd.service as required !!!
 systemctl --user daemon-reload
 systemctl --user enable cwkd
 systemctl --user start cwkd
