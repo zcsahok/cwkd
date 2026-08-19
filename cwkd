@@ -49,8 +49,8 @@ class KeyerDeque(deque):
         super().__init__(kwargs)
         self._sem = Semaphore(value=0)
 
-    def append(self, elem):
-        super().append(elem)
+    def append(self, x):
+        super().append(x)
         self._sem.release()
 
     def popleft(self):

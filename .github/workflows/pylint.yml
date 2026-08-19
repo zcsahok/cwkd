@@ -3,7 +3,7 @@ name: Pylint
 on: [push]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -13,5 +13,5 @@ jobs:
       uses: Silleellie/pylint-github-action@v3
       with:
         lint-path: cwkd
-        python-version: 3.11
+        python-version: 3.13
 
