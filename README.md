@@ -1,4 +1,4 @@
-![pylint](https://img.shields.io/badge/PyLint-9.33-yellow?logo=python&logoColor=white) 
+![pylint](https://img.shields.io/badge/PyLint-9.41-yellow?logo=python&logoColor=white) 
 
 # CW Keyer Daemon
 
