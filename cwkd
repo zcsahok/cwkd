@@ -271,7 +271,7 @@ class CwdUdpHandler(socketserver.DatagramRequestHandler):
                     try:
                         wpm = int(arg)
                         cw_set_wpm(wpm)
-                    except:
+                    except ValueError:
                         logging.error('ERROR: invalid wpm value %s', arg)
 
                 case '4' | '0': # ESC 4 - abort, ESC 0 - reset
@@ -284,7 +284,7 @@ class CwdUdpHandler(socketserver.DatagramRequestHandler):
                         if secs > 0:
                             secs = min(secs, MAX_TUNE_SECONDS)
                             queue.append(256 + secs)
-                    except:
+                    except ValueError:
                         logging.error('ERROR: invalid tune seconds %s', arg)
 
         else:   # plain text
